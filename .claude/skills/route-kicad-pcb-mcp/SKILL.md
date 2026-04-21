@@ -39,6 +39,7 @@ Read [references/tool-reference.md](references/tool-reference.md) when you need 
 - Use `coordinate_mode="algorithm_only"` for the default scripted flow.
 - Use `coordinate_mode="llm_coordinates"` together with `build_llm_coordinate_context`, `validate_llm_coordinate_plan`, and `apply_llm_coordinate_plan` when the model should emit explicit route coordinates for a small set of nets.
 - For explicit coordinate work, also use the project skill `compute-kicad-route-coordinates`.
+- When using `llm_coordinates` mode, **always apply the automatic trace-width rules** defined in `compute-kicad-route-coordinates`: classify every net (power input, switching node, power output, GND stub, signal) from the `build_llm_coordinate_context` pad data, then set `track_width` per route accordingly. Never use a single default width for all nets.
 
 ### Execute Through the Session
 
