@@ -13,6 +13,7 @@ from typing import Any
 from coordinate_routing import (
     apply_coordinate_plan,
     build_coordinate_context,
+    validate_kicad_pcb_file,
     validate_coordinate_plan,
 )
 from fastmcp import FastMCP
@@ -443,6 +444,37 @@ def _invoke_plan_step(
     raise ValueError(f"Unsupported plan step kind: {step_kind}")
 
 
+def _summarize_coordinate_context(context: dict[str, Any] | None) -> dict[str, Any]:
+    if not context:
+        return {
+            "available": False,
+            "net_count": 0,
+            "net_names": [],
+        }
+
+    nets = context.get("nets") or []
+    return {
+        "available": True,
+        "pcb_path": context.get("pcb_path"),
+        "board": context.get("board"),
+        "defaults": context.get("defaults"),
+        "net_count": len(nets),
+        "net_names": [net.get("net_name") for net in nets if isinstance(net, dict) and net.get("net_name")],
+        "per_net_counts": [
+            {
+                "net_name": net.get("net_name"),
+                "pad_count": net.get("pad_count"),
+                "segment_count": net.get("segment_count"),
+                "via_count": net.get("via_count"),
+                "stub_count": len(net.get("stubs") or []),
+            }
+            for net in nets
+            if isinstance(net, dict)
+        ],
+        "schema_rules": ((context.get("schema_hint") or {}).get("rules") or []),
+    }
+
+
 @mcp.tool(description="Create a persistent routing session so the LLM can analyze, plan, execute, and iterate on one board over multiple tool calls.")
 def create_routing_session(
     board_path: str,
@@ -532,6 +564,7 @@ def build_llm_coordinate_context(
     max_segments_per_net: int = 20,
     max_vias_per_net: int = 12,
     max_stubs_per_net: int = 12,
+    include_full_context: bool = False,
 ) -> dict[str, Any]:
     session = _load_session(session_id)
     board_path = session.get("working_board_path") or session["board_path"]
@@ -549,12 +582,41 @@ def build_llm_coordinate_context(
         session["coordinate_mode"] = "llm_coordinates"
     add_note(session, f"Coordinate routing context prepared from {board_path}.")
     session = _save_session(session)
-    return {
+    response = {
         "session_id": session_id,
         "working_board_path": board_path,
         "coordinate_mode": session["coordinate_mode"],
-        "context": context,
+        "context_summary": _summarize_coordinate_context(context),
+        "stored_in_session": True,
     }
+    if include_full_context:
+        response["context"] = context
+    return response
+
+
+@mcp.tool(description="Fetch the stored coordinate-routing context for a session. Prefer summary mode unless the LLM truly needs the full geometry payload.")
+def get_llm_coordinate_context(session_id: str, include_full_context: bool = False) -> dict[str, Any]:
+    session = _load_session(session_id)
+    context = session.get("coordinate_context")
+    response = {
+        "session_id": session_id,
+        "working_board_path": session.get("working_board_path"),
+        "coordinate_mode": session.get("coordinate_mode"),
+        "context_summary": _summarize_coordinate_context(context),
+        "stored_in_session": bool(context),
+    }
+    if include_full_context and context:
+        response["context"] = context
+    return response
+
+
+@mcp.tool(description="Validate a KiCad PCB file for version-specific net syntax and parser loadability. Optionally uses pcbnew when available.")
+def validate_kicad_pcb(
+    pcb_path: str,
+    use_pcbnew_if_available: bool = False,
+) -> dict[str, Any]:
+    resolved = _require_existing_file(pcb_path)
+    return validate_kicad_pcb_file(resolved, use_pcbnew_if_available=use_pcbnew_if_available)
 
 
 @mcp.tool(description="Validate an LLM-authored coordinate routing plan without modifying the PCB. The plan should be a list of routes with explicit point coordinates and layers.")

@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import Pad
+from kicad_parser import Pad, is_kicad_10
 from routing_utils import pos_key, POSITION_DECIMALS
 
 
@@ -250,6 +250,7 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
     """
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
+    use_net_names = bool(net_id_to_name) and is_kicad_10(content)
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
@@ -257,7 +258,7 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
     # Generate segment S-expressions
     segments = []
     for track in tracks:
-        track_net_name = net_id_to_name.get(track['net_id']) if net_id_to_name else None
+        track_net_name = net_id_to_name.get(track['net_id']) if use_net_names else None
         seg = generate_segment_sexpr(
             track['start'],
             track['end'],
@@ -312,6 +313,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     """
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
+    use_net_names = bool(net_id_to_name) and is_kicad_10(content)
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
@@ -357,7 +359,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     # Generate segment S-expressions
     for track in tracks:
-        track_net_name = net_id_to_name.get(track['net_id']) if net_id_to_name else None
+        track_net_name = net_id_to_name.get(track['net_id']) if use_net_names else None
         seg = generate_segment_sexpr(
             track['start'],
             track['end'],
@@ -371,7 +373,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     # Generate via S-expressions
     if vias:
         for via in vias:
-            via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
+            via_net_name = net_id_to_name.get(via['net_id']) if use_net_names else None
             v = generate_via_sexpr(
                 via['x'],
                 via['y'],

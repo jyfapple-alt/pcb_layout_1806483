@@ -9,11 +9,13 @@ Use this skill when the model should output explicit routing coordinates instead
 
 1. Start or reuse a routing session in `mcp/pcb_routing_server.py`.
 2. Call `build_llm_coordinate_context` for the specific nets you want to route.
-3. Read [references/coordinate-schema.md](references/coordinate-schema.md) before generating any coordinate plan.
-4. Read [references/algorithm-heuristics.md](references/algorithm-heuristics.md) when you need routing heuristics distilled from the embedded algorithm scripts.
-5. Generate a `coordinate_plan` with explicit `points`.
-6. Call `validate_llm_coordinate_plan` before `apply_llm_coordinate_plan`.
-7. If validation or DRC fails, tighten the coordinate plan or fall back to the algorithmic router for that net.
+3. If the summary is not enough, call `get_llm_coordinate_context(include_full_context=true)` to inspect the stored geometry payload.
+4. Read [references/coordinate-schema.md](references/coordinate-schema.md) before generating any coordinate plan.
+5. Read [references/algorithm-heuristics.md](references/algorithm-heuristics.md) when you need routing heuristics distilled from the embedded algorithm scripts.
+6. Generate a `coordinate_plan` with explicit `points`.
+7. Call `validate_llm_coordinate_plan` before `apply_llm_coordinate_plan`.
+8. After applying, inspect `file_validation` in the tool result or call `validate_kicad_pcb` if you need an explicit file-level sanity check.
+9. If validation, file-format checks, or DRC fails, tighten the coordinate plan or fall back to the algorithmic router for that net.
 
 ## When To Use This
 
@@ -32,6 +34,6 @@ Use this skill when the model should output explicit routing coordinates instead
 
 ## Notes
 
-- The current MCP coordinate tools are: `build_llm_coordinate_context`, `validate_llm_coordinate_plan`, and `apply_llm_coordinate_plan`.
+- The current MCP coordinate tools are: `build_llm_coordinate_context`, `get_llm_coordinate_context`, `validate_llm_coordinate_plan`, and `apply_llm_coordinate_plan`.
 - These tools work inside the existing routing session flow, so coordinate work can coexist with algorithmic planning.
 - The embedded runtime that informed this skill lives under `mcp/kicad_routing_tools/`, but you usually should rely on the distilled rules here instead of re-reading the raw scripts unless the route is unusual.

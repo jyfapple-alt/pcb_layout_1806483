@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import fnmatch
 import math
+import re
 from pathlib import Path
 from typing import Any
 
 
 def _import_runtime():
+    import importlib.util
+
     from extract_pcb_geometry import extract_geometry
     from geometry_utils import point_to_segment_distance
-    from kicad_parser import parse_kicad_pcb
+    from kicad_parser import KICAD_10_MIN_VERSION, detect_kicad_version, parse_kicad_pcb
     from kicad_writer import add_tracks_and_vias_to_pcb
     from routing_config import GridRouteConfig
 
@@ -17,8 +20,11 @@ def _import_runtime():
         "extract_geometry": extract_geometry,
         "point_to_segment_distance": point_to_segment_distance,
         "parse_kicad_pcb": parse_kicad_pcb,
+        "detect_kicad_version": detect_kicad_version,
+        "KICAD_10_MIN_VERSION": KICAD_10_MIN_VERSION,
         "add_tracks_and_vias_to_pcb": add_tracks_and_vias_to_pcb,
         "GridRouteConfig": GridRouteConfig,
+        "importlib_util": importlib.util,
     }
 
 
@@ -435,6 +441,7 @@ def apply_coordinate_plan(
 ) -> dict[str, Any]:
     runtime = _import_runtime()
     parse_kicad_pcb = runtime["parse_kicad_pcb"]
+    KICAD_10_MIN_VERSION = runtime["KICAD_10_MIN_VERSION"]
     add_tracks_and_vias_to_pcb = runtime["add_tracks_and_vias_to_pcb"]
 
     validation = validate_coordinate_plan(
@@ -454,19 +461,135 @@ def apply_coordinate_plan(
     pcb_data = parse_kicad_pcb(str(Path(pcb_path).resolve()))
     output_resolved = Path(output_path).resolve()
     output_resolved.parent.mkdir(parents=True, exist_ok=True)
+    use_name_only_nets = getattr(pcb_data, "kicad_version", 0) >= KICAD_10_MIN_VERSION
     wrote = add_tracks_and_vias_to_pcb(
         str(Path(pcb_path).resolve()),
         str(output_resolved),
         validation["tracks"],
         validation["vias"],
-        net_id_to_name=getattr(pcb_data, "net_id_to_name", None),
+        net_id_to_name=getattr(pcb_data, "net_id_to_name", None) if use_name_only_nets else None,
     )
+    file_validation = validate_kicad_pcb_file(output_resolved, use_pcbnew_if_available=True)
+    auto_repair = {
+        "attempted": False,
+        "successful": False,
+        "reason": None,
+    }
+
+    if wrote and not file_validation["valid"]:
+        issue_codes = {issue["code"] for issue in file_validation.get("issues", [])}
+        if "named-net-syntax-in-kicad9" in issue_codes or "numeric-net-syntax-in-kicad10" in issue_codes:
+            auto_repair["attempted"] = True
+            auto_repair["reason"] = "rewrite-with-version-appropriate-net-syntax"
+            fallback_mapping = None if "named-net-syntax-in-kicad9" in issue_codes else getattr(pcb_data, "net_id_to_name", None)
+            wrote = add_tracks_and_vias_to_pcb(
+                str(Path(pcb_path).resolve()),
+                str(output_resolved),
+                validation["tracks"],
+                validation["vias"],
+                net_id_to_name=fallback_mapping,
+            )
+            file_validation = validate_kicad_pcb_file(output_resolved, use_pcbnew_if_available=True)
+            auto_repair["successful"] = bool(wrote and file_validation["valid"])
 
     return {
-        "success": bool(wrote),
+        "success": bool(wrote and file_validation["valid"]),
         "pcb_path": str(Path(pcb_path).resolve()),
         "output_path": str(output_resolved),
         "track_count": len(validation["tracks"]),
         "via_count": len(validation["vias"]),
         "validation": validation,
+        "file_validation": file_validation,
+        "auto_repair": auto_repair,
+    }
+
+
+def validate_kicad_pcb_file(
+    pcb_path: str | Path,
+    *,
+    use_pcbnew_if_available: bool = False,
+) -> dict[str, Any]:
+    runtime = _import_runtime()
+    parse_kicad_pcb = runtime["parse_kicad_pcb"]
+    detect_kicad_version = runtime["detect_kicad_version"]
+    KICAD_10_MIN_VERSION = runtime["KICAD_10_MIN_VERSION"]
+    importlib_util = runtime["importlib_util"]
+
+    resolved = Path(pcb_path).resolve()
+    content = resolved.read_text(encoding="utf-8", errors="replace")
+    version = detect_kicad_version(content)
+    issues: list[dict[str, Any]] = []
+
+    named_net_lines = []
+    numeric_net_lines = []
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        if re.match(r'^\s*\(net\s+"[^"]+"\)\s*$', line):
+            named_net_lines.append({"line": line_number, "text": line.strip()})
+        if re.match(r'^\s*\(net\s+\d+\)\s*$', line):
+            numeric_net_lines.append({"line": line_number, "text": line.strip()})
+
+    if version and version < KICAD_10_MIN_VERSION and named_net_lines:
+        issues.append(
+            {
+                "code": "named-net-syntax-in-kicad9",
+                "message": "KiCad 9 and earlier require numeric net identifiers inside segment/via blocks.",
+                "examples": named_net_lines[:10],
+            }
+        )
+
+    if version >= KICAD_10_MIN_VERSION and numeric_net_lines:
+        issues.append(
+            {
+                "code": "numeric-net-syntax-in-kicad10",
+                "message": "KiCad 10 expects name-only net syntax inside segment/via blocks.",
+                "examples": numeric_net_lines[:10],
+            }
+        )
+
+    parse_ok = True
+    parse_error = None
+    try:
+        parse_kicad_pcb(str(resolved))
+    except Exception as exc:
+        parse_ok = False
+        parse_error = str(exc)
+        issues.append(
+            {
+                "code": "parser-error",
+                "message": str(exc),
+            }
+        )
+
+    pcbnew_result = {
+        "available": False,
+        "ok": None,
+        "error": None,
+    }
+    if use_pcbnew_if_available:
+        if importlib_util.find_spec("pcbnew") is not None:
+            pcbnew_result["available"] = True
+            try:
+                import pcbnew  # type: ignore
+
+                pcbnew.LoadBoard(str(resolved))
+                pcbnew_result["ok"] = True
+            except Exception as exc:
+                pcbnew_result["ok"] = False
+                pcbnew_result["error"] = str(exc)
+                issues.append(
+                    {
+                        "code": "pcbnew-load-error",
+                        "message": str(exc),
+                    }
+                )
+
+    return {
+        "valid": not issues,
+        "pcb_path": str(resolved),
+        "kicad_version": version,
+        "net_syntax_mode": "name-only" if version >= KICAD_10_MIN_VERSION else "numeric",
+        "parse_ok": parse_ok,
+        "parse_error": parse_error,
+        "pcbnew": pcbnew_result,
+        "issues": issues,
     }

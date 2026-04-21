@@ -45,11 +45,15 @@
 - `suggest_next_routing_actions`
   Use to get the next recovery or continuation suggestions for the current session.
 - `build_llm_coordinate_context`
-  Use when the LLM should compute explicit routing coordinates from structured geometry instead of relying only on the autorouter.
+  Use when the LLM should compute explicit routing coordinates from structured geometry instead of relying only on the autorouter. This now returns a summary by default and stores the full geometry in the session.
+- `get_llm_coordinate_context`
+  Use to fetch the stored coordinate context. Set `include_full_context=true` only when the summary is insufficient.
 - `validate_llm_coordinate_plan`
   Use to validate a structured coordinate plan before changing the PCB file.
 - `apply_llm_coordinate_plan`
-  Use to apply a validated coordinate plan, update the session working board, and optionally run post-apply checks.
+  Use to apply a validated coordinate plan, update the session working board, and run post-apply checks. The result now includes file-format validation and automatic syntax repair for version-specific net encoding mismatches.
+- `validate_kicad_pcb`
+  Use to validate a `.kicad_pcb` file for version-specific net syntax and parser loadability after any generated edit.
 - `list_nets`
   Use for diff-pair detection, power-net inspection, or component pad-to-net listings.
 - `create_power_planes`
