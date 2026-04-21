@@ -1,1 +1,7 @@
 /test/
+/mcp/logs/
+/mcp/__pycache__/
+/mcp/kicad_routing_tools/__pycache__/
+/mcp/kicad_routing_tools/bga_fanout/__pycache__/
+/mcp/kicad_routing_tools/qfn_fanout/__pycache__/
+/mcp/kicad_routing_tools/rust_router/target/
