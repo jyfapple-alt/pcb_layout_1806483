@@ -36,7 +36,9 @@ Read [references/tool-reference.md](references/tool-reference.md) when you need 
 - If the board already has the needed GND or power zone, prefer keeping it instead of recreating it.
 - If the analysis flags BGA, PGA, QFN, or QFP parts, fanout before general routing.
 - Route differential pairs before single-ended signals.
-- Use `coordinate_mode="algorithm_only"` for the current MVP. Reserve future modes such as user-confirmed coordinates or LLM-suggested coordinates for later iterations.
+- Use `coordinate_mode="algorithm_only"` for the default scripted flow.
+- Use `coordinate_mode="llm_coordinates"` together with `build_llm_coordinate_context`, `validate_llm_coordinate_plan`, and `apply_llm_coordinate_plan` when the model should emit explicit route coordinates for a small set of nets.
+- For explicit coordinate work, also use the project skill `compute-kicad-route-coordinates`.
 
 ### Execute Through the Session
 

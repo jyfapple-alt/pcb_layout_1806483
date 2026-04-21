@@ -44,6 +44,12 @@
   Use to summarize blocked steps, failed nets, and retry-relevant details from the latest execution.
 - `suggest_next_routing_actions`
   Use to get the next recovery or continuation suggestions for the current session.
+- `build_llm_coordinate_context`
+  Use when the LLM should compute explicit routing coordinates from structured geometry instead of relying only on the autorouter.
+- `validate_llm_coordinate_plan`
+  Use to validate a structured coordinate plan before changing the PCB file.
+- `apply_llm_coordinate_plan`
+  Use to apply a validated coordinate plan, update the session working board, and optionally run post-apply checks.
 - `list_nets`
   Use for diff-pair detection, power-net inspection, or component pad-to-net listings.
 - `create_power_planes`

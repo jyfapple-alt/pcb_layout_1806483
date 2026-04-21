@@ -78,6 +78,9 @@ def create_session(
         "proposed_plan": None,
         "execution_history": [],
         "latest_checks": {},
+        "coordinate_context": None,
+        "latest_coordinate_validation": None,
+        "coordinate_history": [],
         "artifacts": {
             "boards": [board_path],
             "logs": [],
@@ -132,4 +135,3 @@ def add_note(session: dict[str, Any], note: str) -> dict[str, Any]:
         }
     )
     return session
-

@@ -10,6 +10,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from coordinate_routing import (
+    apply_coordinate_plan,
+    build_coordinate_context,
+    validate_coordinate_plan,
+)
 from fastmcp import FastMCP
 from route_analysis import analyze_board
 from route_planner import build_routing_plan, summarize_execution_failures
@@ -515,6 +520,147 @@ def propose_routing_plan(
         "working_board_path": session["working_board_path"],
         "analysis_snapshot": plan["analysis_snapshot"],
         "plan": plan,
+    }
+
+
+@mcp.tool(description="Build a structured geometry context for LLM-authored coordinate routing. Use this before asking the LLM to output explicit track and via coordinates.")
+def build_llm_coordinate_context(
+    session_id: str,
+    nets: list[str] | None = None,
+    net_patterns: list[str] | None = None,
+    max_pads_per_net: int = 12,
+    max_segments_per_net: int = 20,
+    max_vias_per_net: int = 12,
+    max_stubs_per_net: int = 12,
+) -> dict[str, Any]:
+    session = _load_session(session_id)
+    board_path = session.get("working_board_path") or session["board_path"]
+    context = build_coordinate_context(
+        board_path,
+        net_names=nets,
+        net_patterns=net_patterns,
+        max_pads_per_net=max_pads_per_net,
+        max_segments_per_net=max_segments_per_net,
+        max_vias_per_net=max_vias_per_net,
+        max_stubs_per_net=max_stubs_per_net,
+    )
+    session["coordinate_context"] = context
+    if session.get("coordinate_mode") == "algorithm_only":
+        session["coordinate_mode"] = "llm_coordinates"
+    add_note(session, f"Coordinate routing context prepared from {board_path}.")
+    session = _save_session(session)
+    return {
+        "session_id": session_id,
+        "working_board_path": board_path,
+        "coordinate_mode": session["coordinate_mode"],
+        "context": context,
+    }
+
+
+@mcp.tool(description="Validate an LLM-authored coordinate routing plan without modifying the PCB. The plan should be a list of routes with explicit point coordinates and layers.")
+def validate_llm_coordinate_plan(
+    session_id: str,
+    coordinate_plan: dict[str, Any],
+    endpoint_tolerance: float = 0.2,
+    grid_tolerance: float = 0.01,
+) -> dict[str, Any]:
+    session = _load_session(session_id)
+    board_path = session.get("working_board_path") or session["board_path"]
+    validation = validate_coordinate_plan(
+        board_path,
+        coordinate_plan,
+        endpoint_tolerance=endpoint_tolerance,
+        grid_tolerance=grid_tolerance,
+    )
+    session["latest_coordinate_validation"] = validation
+    add_note(session, f"Coordinate plan validated against {board_path}.")
+    session = _save_session(session)
+    return {
+        "session_id": session_id,
+        "working_board_path": board_path,
+        "validation": validation,
+    }
+
+
+@mcp.tool(description="Apply an LLM-authored coordinate routing plan to the current session board, then optionally run connectivity, DRC, and orphan-stub checks.")
+def apply_llm_coordinate_plan(
+    session_id: str,
+    coordinate_plan: dict[str, Any],
+    output_board: str | None = None,
+    endpoint_tolerance: float = 0.2,
+    grid_tolerance: float = 0.01,
+    run_checks: bool = True,
+    clearance: float | None = None,
+) -> dict[str, Any]:
+    session = _load_session(session_id)
+    board_path = session.get("working_board_path") or session["board_path"]
+    output_path = (
+        str(_resolve_path(output_board))
+        if output_board
+        else str(Path(session["output_dir"]) / f"{Path(board_path).stem}_llm_coords_{len(session.get('coordinate_history', [])) + 1}.kicad_pcb")
+    )
+    result = apply_coordinate_plan(
+        board_path,
+        output_path,
+        coordinate_plan,
+        endpoint_tolerance=endpoint_tolerance,
+        grid_tolerance=grid_tolerance,
+    )
+
+    checks: dict[str, Any] = {}
+    if result.get("success") and run_checks:
+        target_nets = [
+            route.get("net") or route.get("net_name")
+            for route in (coordinate_plan.get("routes") or [])
+            if isinstance(route, dict) and (route.get("net") or route.get("net_name"))
+        ]
+        drc_clearance = clearance
+        if drc_clearance is None:
+            drc_clearance = (session.get("constraints") or {}).get("clearance")
+        checks["check_connectivity"] = check_connectivity(result["output_path"], nets=target_nets or None)
+        checks["check_drc"] = check_drc(result["output_path"], clearance=drc_clearance) if drc_clearance is not None else check_drc(result["output_path"])
+        checks["check_orphan_stubs"] = check_orphan_stubs(result["output_path"])
+        for check_result in checks.values():
+            _record_artifact(session, "logs", check_result.get("log_path"))
+        session["latest_checks"] = {
+            name: {
+                "board_path": result["output_path"],
+                "checked_at": utc_now_iso(),
+                "result": check_result,
+            }
+            for name, check_result in checks.items()
+        }
+
+    history_entry = {
+        "applied_at": utc_now_iso(),
+        "input_board_path": board_path,
+        "output_board_path": result.get("output_path"),
+        "success": result.get("success", False),
+        "track_count": result.get("track_count", 0),
+        "via_count": result.get("via_count", 0),
+        "validation": result.get("validation"),
+        "checks": checks,
+    }
+    session.setdefault("coordinate_history", []).append(history_entry)
+    session["latest_coordinate_validation"] = result.get("validation")
+
+    if result.get("success"):
+        session["working_board_path"] = result["output_path"]
+        session["coordinate_mode"] = "llm_coordinates"
+        session["status"] = "coordinate-routed"
+        _record_artifact(session, "boards", result["output_path"])
+        add_note(session, f"Applied LLM coordinate plan to {result['output_path']}.")
+    else:
+        session["status"] = "coordinate-validation-failed"
+        add_note(session, f"Rejected LLM coordinate plan for {board_path}.")
+
+    session = _save_session(session)
+    return {
+        "session_id": session_id,
+        "coordinate_mode": session["coordinate_mode"],
+        "working_board_path": session.get("working_board_path"),
+        "result": result,
+        "checks": checks,
     }
 
 
@@ -1105,7 +1251,24 @@ def suggest_next_routing_actions(session_id: str) -> dict[str, Any]:
             },
         )
 
-    if session.get("coordinate_mode") != "algorithm_only":
+    if session.get("coordinate_mode") == "llm_coordinates":
+        if not session.get("coordinate_context"):
+            suggestions.insert(
+                0,
+                {
+                    "action": "build-coordinate-context",
+                    "reason": "LLM coordinate mode is active but no geometry context snapshot has been prepared yet.",
+                },
+            )
+        if not session.get("coordinate_history"):
+            suggestions.insert(
+                1,
+                {
+                    "action": "validate-or-apply-coordinate-plan",
+                    "reason": "No LLM-authored coordinate plan has been attempted in this session yet.",
+                },
+            )
+    elif session.get("coordinate_mode") != "algorithm_only":
         suggestions.append(
             {
                 "action": "review-coordinate-mode",
