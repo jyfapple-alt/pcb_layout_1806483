@@ -343,6 +343,101 @@ def _save_session(session: dict[str, Any]) -> dict[str, Any]:
     return save_session(SESSION_ROOT, session)
 
 
+def _record_artifact(session: dict[str, Any], bucket: str, value: str | None) -> None:
+    if not value:
+        return
+    artifacts = session.setdefault("artifacts", {})
+    items = artifacts.setdefault(bucket, [])
+    if value not in items:
+        items.append(value)
+
+
+def _result_has_route_failures(result: dict[str, Any]) -> bool:
+    summary = result.get("json_summary") or {}
+    return bool(summary.get("failed_single") or summary.get("failed_multipoint"))
+
+
+def _result_requires_attention(step_kind: str, result: dict[str, Any]) -> bool:
+    if not result.get("success", False):
+        return True
+    if step_kind in {"route_single_ended", "route_differential_pairs"}:
+        return _result_has_route_failures(result)
+    return False
+
+
+def _invoke_plan_step(
+    step_kind: str,
+    *,
+    input_board: str,
+    output_board: str | None,
+    parameters: dict[str, Any] | None,
+) -> dict[str, Any]:
+    params = dict(parameters or {})
+    timeout_seconds = int(params.pop("timeout_seconds", 900))
+
+    if step_kind == "create_power_planes":
+        return create_power_planes(
+            input_pcb=input_board,
+            output_pcb=output_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    if step_kind == "run_bga_fanout":
+        return run_bga_fanout(
+            pcb_path=input_board,
+            output_path=output_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    if step_kind == "run_qfn_fanout":
+        return run_qfn_fanout(
+            pcb_path=input_board,
+            output_path=output_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    if step_kind == "route_differential_pairs":
+        return route_differential_pairs(
+            input_pcb=input_board,
+            output_pcb=output_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    if step_kind == "route_single_ended":
+        return route_single_ended(
+            input_pcb=input_board,
+            output_pcb=output_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    if step_kind == "repair_disconnected_planes":
+        return repair_disconnected_planes(
+            input_pcb=input_board,
+            output_pcb=output_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    if step_kind == "check_connectivity":
+        return check_connectivity(
+            pcb_path=input_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    if step_kind == "check_drc":
+        return check_drc(
+            pcb_path=input_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    if step_kind == "check_orphan_stubs":
+        return check_orphan_stubs(
+            input_pcb=input_board,
+            timeout_seconds=timeout_seconds,
+            **params,
+        )
+    raise ValueError(f"Unsupported plan step kind: {step_kind}")
+
+
 @mcp.tool(description="Create a persistent routing session so the LLM can analyze, plan, execute, and iterate on one board over multiple tool calls.")
 def create_routing_session(
     board_path: str,
@@ -836,6 +931,197 @@ def check_orphan_stubs(
     if extra_args:
         args.extend(extra_args)
     return _run_script("check_orphan_stubs.py", args, timeout_seconds=timeout_seconds)
+
+
+@mcp.tool(description="Execute a stored routing plan step by step inside a routing session and persist the resulting board state, logs, and latest check results.")
+def apply_routing_plan(
+    session_id: str,
+    plan: dict[str, Any] | None = None,
+    stop_after_step: int | None = None,
+    continue_on_error: bool = False,
+) -> dict[str, Any]:
+    session = _load_session(session_id)
+    active_plan = plan or session.get("proposed_plan")
+    if not active_plan:
+        raise ValueError(f"Session {session_id} does not have a proposed plan to execute.")
+
+    if plan is not None:
+        session["proposed_plan"] = active_plan
+
+    execution_id = f"exec_{uuid.uuid4().hex[:8]}"
+    current_board = str(_require_existing_file(session.get("working_board_path") or session["board_path"]))
+    execution = {
+        "execution_id": execution_id,
+        "plan_id": active_plan.get("plan_id"),
+        "objective": active_plan.get("objective"),
+        "started_at": utc_now_iso(),
+        "completed_at": None,
+        "status": "running",
+        "initial_board_path": current_board,
+        "final_board_path": current_board,
+        "steps": [],
+    }
+
+    truncated = False
+    failed = False
+
+    try:
+        for index, step in enumerate(active_plan.get("steps", []), start=1):
+            if stop_after_step is not None and index > stop_after_step:
+                truncated = True
+                break
+
+            step_kind = step["kind"]
+            input_board = current_board
+            output_board = step.get("output_board")
+            parameters = dict(step.get("parameters") or {})
+
+            step_record = {
+                "index": index,
+                "step_id": step.get("step_id"),
+                "kind": step_kind,
+                "reason": step.get("reason"),
+                "input_board": input_board,
+                "output_board": output_board,
+                "parameters": parameters,
+                "started_at": utc_now_iso(),
+                "completed_at": None,
+                "status": "running",
+                "result": None,
+            }
+
+            result = _invoke_plan_step(
+                step_kind,
+                input_board=input_board,
+                output_board=output_board,
+                parameters=parameters,
+            )
+
+            step_record["result"] = result
+            step_record["completed_at"] = utc_now_iso()
+            step_record["status"] = "failed" if _result_requires_attention(step_kind, result) else "completed"
+            execution["steps"].append(step_record)
+
+            _record_artifact(session, "logs", result.get("log_path"))
+            if output_board and Path(output_board).exists():
+                _record_artifact(session, "boards", str(Path(output_board).resolve()))
+
+            if step_kind in {"check_connectivity", "check_drc", "check_orphan_stubs"}:
+                session.setdefault("latest_checks", {})[step_kind] = {
+                    "board_path": input_board,
+                    "checked_at": step_record["completed_at"],
+                    "result": result,
+                }
+
+            if result.get("success") and output_board and Path(output_board).exists():
+                current_board = str(Path(output_board).resolve())
+
+            if _result_requires_attention(step_kind, result):
+                failed = True
+                if not continue_on_error:
+                    break
+    except Exception as exc:
+        failed = True
+        execution["steps"].append(
+            {
+                "index": len(execution["steps"]) + 1,
+                "step_id": "internal-error",
+                "kind": "internal",
+                "reason": "Unhandled exception during plan execution.",
+                "input_board": current_board,
+                "output_board": None,
+                "parameters": {},
+                "started_at": utc_now_iso(),
+                "completed_at": utc_now_iso(),
+                "status": "failed",
+                "result": {
+                    "success": False,
+                    "error": str(exc),
+                },
+            }
+        )
+    finally:
+        execution["completed_at"] = utc_now_iso()
+        execution["final_board_path"] = current_board
+
+        if failed:
+            execution["status"] = "failed"
+            session["status"] = "failed"
+            add_note(session, f"Plan execution {execution_id} completed with failures.")
+        elif truncated:
+            execution["status"] = "partial"
+            session["status"] = "partial"
+            add_note(session, f"Plan execution {execution_id} stopped after step {stop_after_step}.")
+        else:
+            execution["status"] = "completed"
+            session["status"] = "executed"
+            add_note(session, f"Plan execution {execution_id} completed successfully.")
+
+        session["working_board_path"] = current_board
+        session.setdefault("execution_history", []).append(execution)
+        session = _save_session(session)
+
+    return {
+        "session_id": session_id,
+        "execution_id": execution_id,
+        "status": execution["status"],
+        "working_board_path": session["working_board_path"],
+        "executed_steps": len(execution["steps"]),
+        "plan_id": active_plan.get("plan_id"),
+        "latest_checks": session.get("latest_checks", {}),
+        "last_step": execution["steps"][-1] if execution["steps"] else None,
+    }
+
+
+@mcp.tool(description="Summarize the latest execution failures for a routing session so the LLM can decide how to retry or adjust the plan.")
+def analyze_session_failures(session_id: str) -> dict[str, Any]:
+    session = _load_session(session_id)
+    summary = summarize_execution_failures(session)
+    summary["working_board_path"] = session.get("working_board_path")
+    summary["coordinate_mode"] = session.get("coordinate_mode")
+    return summary
+
+
+@mcp.tool(description="Suggest the next routing actions for a session using stored analysis, current board state, and the latest execution outcomes.")
+def suggest_next_routing_actions(session_id: str) -> dict[str, Any]:
+    session = _load_session(session_id)
+    summary = summarize_execution_failures(session)
+    suggestions = list(summary.get("next_actions") or [])
+
+    if not session.get("analysis"):
+        suggestions.insert(
+            0,
+            {
+                "action": "analyze-board",
+                "reason": "This session has no stored analysis snapshot yet.",
+            },
+        )
+    elif not session.get("proposed_plan"):
+        suggestions.insert(
+            0,
+            {
+                "action": "propose-plan",
+                "reason": "The board has analysis data but no executable routing plan yet.",
+            },
+        )
+
+    if session.get("coordinate_mode") != "algorithm_only":
+        suggestions.append(
+            {
+                "action": "review-coordinate-mode",
+                "reason": "This session is marked for a future non-default coordinate workflow. The current MVP still executes with the algorithmic router.",
+                "coordinate_mode": session.get("coordinate_mode"),
+            }
+        )
+
+    return {
+        "session_id": session_id,
+        "status": session.get("status"),
+        "working_board_path": session.get("working_board_path"),
+        "coordinate_mode": session.get("coordinate_mode"),
+        "latest_execution_summary": summary,
+        "suggestions": suggestions,
+    }
 
 
 if __name__ == "__main__":

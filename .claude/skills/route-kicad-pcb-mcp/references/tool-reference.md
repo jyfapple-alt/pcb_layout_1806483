@@ -12,16 +12,13 @@
 
 1. `router_environment_status`
 2. `build_rust_router` if the Rust module is missing
-3. `inspect_pcb`
-4. `list_nets`
-5. `create_power_planes` when planes are needed
-6. `run_bga_fanout` or `run_qfn_fanout` when dense packages need escape routing
-7. `route_differential_pairs` when diff pairs exist
-8. `route_single_ended` for remaining nets
-9. `repair_disconnected_planes` when planes were cut by routing
-10. `check_connectivity`
-11. `check_drc`
-12. `check_orphan_stubs`
+3. `create_routing_session`
+4. `analyze_board_for_llm`
+5. `propose_routing_plan`
+6. `apply_routing_plan`
+7. `analyze_session_failures`
+8. `suggest_next_routing_actions`
+9. `inspect_pcb` or `list_nets` only when extra ad-hoc detail is needed
 
 ## Tool Mapping
 
@@ -31,6 +28,22 @@
   Use before routing starts or when imports fail.
 - `build_rust_router`
   Use when `grid_router` is missing or outdated.
+- `create_routing_session`
+  Use to create persistent board-routing context that survives multiple MCP calls.
+- `get_routing_session`
+  Use to inspect the current working board path, stored analysis, plan, and execution history.
+- `list_routing_sessions`
+  Use to enumerate resumable routing sessions.
+- `analyze_board_for_llm`
+  Use as the primary structured analysis entry point for the session flow.
+- `propose_routing_plan`
+  Use to turn objective and constraints into an executable step list.
+- `apply_routing_plan`
+  Use to execute the current session plan and persist the updated working board plus all log paths.
+- `analyze_session_failures`
+  Use to summarize blocked steps, failed nets, and retry-relevant details from the latest execution.
+- `suggest_next_routing_actions`
+  Use to get the next recovery or continuation suggestions for the current session.
 - `list_nets`
   Use for diff-pair detection, power-net inspection, or component pad-to-net listings.
 - `create_power_planes`
@@ -53,6 +66,13 @@
   Wraps `check_orphan_stubs.py`.
 - `run_routing_script`
   Use only when a dedicated tool lacks a needed flag. Limit it to scripts already supported by the server.
+
+## Coordinate Modes
+
+- `algorithm_only`
+  Current MVP mode. The LLM decides plan intent and routing constraints, while the embedded router computes coordinates.
+- Future modes
+  Reserve session metadata for later workflows such as asking the user before coordinate generation, hybrid coordinate hints, or LLM-suggested coordinates.
 
 ## Retry Heuristics
 

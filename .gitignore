@@ -1,5 +1,6 @@
 /test/
 /mcp/logs/
+/mcp/routing_sessions/
 /mcp/__pycache__/
 /mcp/kicad_routing_tools/__pycache__/
 /mcp/kicad_routing_tools/bga_fanout/__pycache__/
