@@ -1,0 +1,4 @@
+interface:
+  display_name: "Place KiCad Footprints"
+  short_description: "Infer and apply KiCad footprint layout through the local MCP service."
+  default_prompt: "Use $place-kicad-footprints-mcp to infer a fresh footprint placement for a KiCad PCB before routing."

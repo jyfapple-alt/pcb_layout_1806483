@@ -14,11 +14,13 @@
 2. `build_rust_router` if the Rust module is missing
 3. `create_routing_session`
 4. `analyze_board_for_llm`
-5. `propose_routing_plan`
-6. `apply_routing_plan`
-7. `analyze_session_failures`
-8. `suggest_next_routing_actions`
-9. `inspect_pcb` or `list_nets` only when extra ad-hoc detail is needed
+5. `auto_place_session_footprints` when `analysis.placement_hints.needs_placement` is true
+6. `analyze_board_for_llm` again if routing decisions should use the new geometry
+7. `propose_routing_plan`
+8. `apply_routing_plan`
+9. `analyze_session_failures`
+10. `suggest_next_routing_actions`
+11. `inspect_pcb` or `list_nets` only when extra ad-hoc detail is needed
 
 ## Tool Mapping
 
@@ -35,9 +37,21 @@
 - `list_routing_sessions`
   Use to enumerate resumable routing sessions.
 - `analyze_board_for_llm`
-  Use as the primary structured analysis entry point for the session flow.
+  Use as the primary structured analysis entry point for the session flow. This now includes `placement_hints`.
+- `auto_place_footprints`
+  Use for one-shot heuristic footprint placement on a board file.
+- `auto_place_session_footprints`
+  Use as the default session-aware footprint placement step before routing.
+- `build_llm_placement_context`
+  Use when the LLM should compute explicit footprint coordinates from structured board and connectivity context.
+- `get_llm_placement_context`
+  Use to fetch the stored placement context. Set `include_full_context=true` only when the summary is insufficient.
+- `validate_llm_placement_plan`
+  Use to validate a structured placement plan before changing the PCB file.
+- `apply_llm_placement_plan`
+  Use to apply a validated placement plan, update the session working board, and refresh analysis if needed.
 - `propose_routing_plan`
-  Use to turn objective and constraints into an executable step list.
+  Use to turn objective and constraints into an executable step list. With `placement_mode="auto"`, the plan now inserts footprint placement when analysis says it is needed.
 - `apply_routing_plan`
   Use to execute the current session plan and persist the updated working board plus all log paths.
 - `analyze_session_failures`
@@ -45,13 +59,13 @@
 - `suggest_next_routing_actions`
   Use to get the next recovery or continuation suggestions for the current session.
 - `build_llm_coordinate_context`
-  Use when the LLM should compute explicit routing coordinates from structured geometry instead of relying only on the autorouter. This now returns a summary by default and stores the full geometry in the session.
+  Use when the LLM should compute explicit routing coordinates from structured geometry instead of relying only on the autorouter. This returns a summary by default and stores the full geometry in the session. In coordinate mode, plan for obtuse same-layer bends and replace any 90-degree corner with a 45-degree chamfer.
 - `get_llm_coordinate_context`
   Use to fetch the stored coordinate context. Set `include_full_context=true` only when the summary is insufficient.
 - `validate_llm_coordinate_plan`
-  Use to validate a structured coordinate plan before changing the PCB file.
+  Use to validate a structured coordinate plan before changing the PCB file. The validator rejects same-layer 90-degree or sharper bends, so coordinate plans must use obtuse corners.
 - `apply_llm_coordinate_plan`
-  Use to apply a validated coordinate plan, update the session working board, and run post-apply checks. The result now includes file-format validation and automatic syntax repair for version-specific net encoding mismatches.
+  Use to apply a validated coordinate plan, update the session working board, and run post-apply checks. The result includes file-format validation and automatic syntax repair for version-specific net encoding mismatches.
 - `validate_kicad_pcb`
   Use to validate a `.kicad_pcb` file for version-specific net syntax and parser loadability after any generated edit.
 - `list_nets`
@@ -81,6 +95,8 @@
 
 - `algorithm_only`
   Current MVP mode. The LLM decides plan intent and routing constraints, while the embedded router computes coordinates.
+- `llm_placement`
+  Placement context or explicit placement planning is active for the session.
 - Future modes
   Reserve session metadata for later workflows such as asking the user before coordinate generation, hybrid coordinate hints, or LLM-suggested coordinates.
 

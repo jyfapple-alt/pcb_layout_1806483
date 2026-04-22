@@ -33,8 +33,11 @@ The algorithmic router starts from real conductors, not free-floating points. Mi
 
 ## Shape Heuristics
 
-- Prefer short Manhattan paths first.
-- Use diagonal segments only when they clearly reduce length or avoid congestion cleanly.
+- Prefer short routes built from straight runs plus 45-degree chamfers.
+- Do not use same-layer Manhattan L-corners. Split any orthogonal direction change into two 45-degree turns so the copper corner stays obtuse.
+- Use diagonal segments when they replace a right angle or avoid congestion cleanly.
+- When the grid allows it, keep diagonal chamfers at equal `|dx|` and `|dy|` for clean 45-degree geometry.
+- Avoid acute corners, U-turns, and zig-zagging.
 - Reduce bend count before optimizing anything else.
 - Use fewer vias unless the layer switch removes a strong blockage.
 

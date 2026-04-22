@@ -17,6 +17,12 @@ from coordinate_routing import (
     validate_coordinate_plan,
 )
 from fastmcp import FastMCP
+from footprint_placement import (
+    apply_placement_plan as apply_footprint_placement_plan,
+    auto_place_footprints as auto_place_footprints_heuristic,
+    build_placement_context,
+    validate_placement_plan,
+)
 from route_analysis import analyze_board
 from route_planner import build_routing_plan, summarize_execution_failures
 from routing_session_store import add_note, create_session, list_sessions, load_session, save_session, utc_now_iso
@@ -381,6 +387,12 @@ def _invoke_plan_step(
     params = dict(parameters or {})
     timeout_seconds = int(params.pop("timeout_seconds", 900))
 
+    if step_kind == "auto_place_footprints":
+        return auto_place_footprints(
+            pcb_path=input_board,
+            output_path=output_board,
+            **params,
+        )
     if step_kind == "create_power_planes":
         return create_power_planes(
             input_pcb=input_board,
@@ -475,6 +487,36 @@ def _summarize_coordinate_context(context: dict[str, Any] | None) -> dict[str, A
     }
 
 
+def _summarize_placement_context(context: dict[str, Any] | None) -> dict[str, Any]:
+    if not context:
+        return {
+            "available": False,
+            "footprint_count": 0,
+            "references": [],
+        }
+
+    footprints = context.get("footprints") or []
+    return {
+        "available": True,
+        "pcb_path": context.get("pcb_path"),
+        "board": context.get("board"),
+        "placement_hints": context.get("placement_hints"),
+        "footprint_count": len(footprints),
+        "references": [item.get("reference") for item in footprints if isinstance(item, dict) and item.get("reference")],
+        "roles": [
+            {
+                "reference": item.get("reference"),
+                "role": item.get("component_role"),
+                "net_roles": item.get("net_roles"),
+                "connected_to": [entry.get("reference") for entry in (item.get("connected_components") or [])[:4] if isinstance(entry, dict)],
+            }
+            for item in footprints
+            if isinstance(item, dict)
+        ],
+        "schema_rules": ((context.get("schema_hint") or {}).get("rules") or []),
+    }
+
+
 @mcp.tool(description="Create a persistent routing session so the LLM can analyze, plan, execute, and iterate on one board over multiple tool calls.")
 def create_routing_session(
     board_path: str,
@@ -482,6 +524,7 @@ def create_routing_session(
     output_dir: str | None = None,
     description: str | None = None,
     coordinate_mode: str = "algorithm_only",
+    placement_mode: str = "auto",
 ) -> dict[str, Any]:
     resolved_board = str(_require_existing_file(board_path))
     resolved_output = str(_resolve_path(output_dir)) if output_dir else None
@@ -492,6 +535,7 @@ def create_routing_session(
         session_name=session_name,
         description=description,
         coordinate_mode=coordinate_mode,
+        placement_mode=placement_mode,
     )
     add_note(session, "Routing session created.")
     session = _save_session(session)
@@ -542,6 +586,8 @@ def propose_routing_plan(
     session["constraints"] = constraints or {}
     if constraints and constraints.get("coordinate_mode"):
         session["coordinate_mode"] = constraints["coordinate_mode"]
+    if constraints and constraints.get("placement_mode"):
+        session["placement_mode"] = constraints["placement_mode"]
     plan = build_routing_plan(session, analysis, objective=objective, constraints=constraints)
     session["proposed_plan"] = plan
     session["status"] = "planned"
@@ -552,6 +598,226 @@ def propose_routing_plan(
         "working_board_path": session["working_board_path"],
         "analysis_snapshot": plan["analysis_snapshot"],
         "plan": plan,
+    }
+
+
+@mcp.tool(description="Automatically place footprints using board outline, component sizes, net roles, and connectivity heuristics. Best for fresh boards or boards whose footprints were reset to a common origin.")
+def auto_place_footprints(
+    pcb_path: str,
+    output_path: str | None = None,
+    references: list[str] | None = None,
+    zero_only: bool = True,
+    placement_gap: float = 1.0,
+    board_margin: float = 0.25,
+    grid_step: float = 0.25,
+) -> dict[str, Any]:
+    resolved_input = str(_require_existing_file(pcb_path))
+    resolved_output = (
+        str(_resolve_path(output_path))
+        if output_path
+        else str(Path(resolved_input).with_name(f"{Path(resolved_input).stem}_placed.kicad_pcb"))
+    )
+    return auto_place_footprints_heuristic(
+        resolved_input,
+        resolved_output,
+        references=references,
+        zero_only=zero_only,
+        placement_gap=placement_gap,
+        board_margin=board_margin,
+        grid_step=grid_step,
+    )
+
+
+@mcp.tool(description="Build a structured context for LLM-authored footprint placement. Use this before asking the LLM to choose new footprint coordinates.")
+def build_llm_placement_context(
+    session_id: str,
+    references: list[str] | None = None,
+    include_full_context: bool = False,
+) -> dict[str, Any]:
+    session = _load_session(session_id)
+    board_path = session.get("working_board_path") or session["board_path"]
+    context = build_placement_context(board_path, references=references)
+    session["placement_context"] = context
+    if session.get("placement_mode") == "auto":
+        session["placement_mode"] = "llm_placement"
+    add_note(session, f"Placement context prepared from {board_path}.")
+    session = _save_session(session)
+    response = {
+        "session_id": session_id,
+        "working_board_path": board_path,
+        "placement_mode": session.get("placement_mode"),
+        "context_summary": _summarize_placement_context(context),
+        "stored_in_session": True,
+    }
+    if include_full_context:
+        response["context"] = context
+    return response
+
+
+@mcp.tool(description="Fetch the stored LLM placement context for a session. Prefer summary mode unless the LLM needs the full footprint graph and board geometry.")
+def get_llm_placement_context(session_id: str, include_full_context: bool = False) -> dict[str, Any]:
+    session = _load_session(session_id)
+    context = session.get("placement_context")
+    response = {
+        "session_id": session_id,
+        "working_board_path": session.get("working_board_path"),
+        "placement_mode": session.get("placement_mode"),
+        "context_summary": _summarize_placement_context(context),
+        "stored_in_session": bool(context),
+    }
+    if include_full_context and context:
+        response["context"] = context
+    return response
+
+
+@mcp.tool(description="Validate an LLM-authored footprint placement plan without modifying the PCB. The plan should place footprints inside the board outline with adequate spacing.")
+def validate_llm_placement_plan(
+    session_id: str,
+    placement_plan: dict[str, Any],
+    placement_gap: float = 1.0,
+    board_margin: float = 0.25,
+) -> dict[str, Any]:
+    session = _load_session(session_id)
+    board_path = session.get("working_board_path") or session["board_path"]
+    validation = validate_placement_plan(
+        board_path,
+        placement_plan,
+        placement_gap=placement_gap,
+        board_margin=board_margin,
+    )
+    session["latest_placement_validation"] = validation
+    add_note(session, f"Placement plan validated against {board_path}.")
+    session = _save_session(session)
+    return {
+        "session_id": session_id,
+        "working_board_path": board_path,
+        "validation": validation,
+    }
+
+
+@mcp.tool(description="Apply an LLM-authored footprint placement plan to the current session board, then optionally refresh the stored analysis snapshot.")
+def apply_llm_placement_plan(
+    session_id: str,
+    placement_plan: dict[str, Any],
+    output_board: str | None = None,
+    placement_gap: float = 1.0,
+    board_margin: float = 0.25,
+    refresh_analysis: bool = True,
+) -> dict[str, Any]:
+    session = _load_session(session_id)
+    board_path = session.get("working_board_path") or session["board_path"]
+    output_path = (
+        str(_resolve_path(output_board))
+        if output_board
+        else str(Path(session["output_dir"]) / f"{Path(board_path).stem}_llm_place_{len(session.get('placement_history', [])) + 1}.kicad_pcb")
+    )
+    result = apply_footprint_placement_plan(
+        board_path,
+        output_path,
+        placement_plan,
+        placement_gap=placement_gap,
+        board_margin=board_margin,
+    )
+
+    file_validation: dict[str, Any] | None = None
+    if result.get("success"):
+        file_validation = validate_kicad_pcb_file(result["output_path"], use_pcbnew_if_available=False)
+        result["file_validation"] = file_validation
+
+    history_entry = {
+        "applied_at": utc_now_iso(),
+        "input_board_path": board_path,
+        "output_board_path": result.get("output_path"),
+        "success": result.get("success", False),
+        "validation": result.get("validation"),
+        "file_validation": file_validation,
+    }
+    session.setdefault("placement_history", []).append(history_entry)
+    session["latest_placement_validation"] = result.get("validation")
+
+    if result.get("success"):
+        session["working_board_path"] = result["output_path"]
+        session["placement_mode"] = "llm_placement"
+        session["status"] = "placed"
+        _record_artifact(session, "boards", result["output_path"])
+        if refresh_analysis:
+            session["analysis"] = analyze_board(result["output_path"])
+        add_note(session, f"Applied LLM placement plan to {result['output_path']}.")
+    else:
+        session["status"] = "placement-validation-failed"
+        add_note(session, f"Rejected LLM placement plan for {board_path}.")
+
+    session = _save_session(session)
+    return {
+        "session_id": session_id,
+        "placement_mode": session.get("placement_mode"),
+        "working_board_path": session.get("working_board_path"),
+        "result": result,
+    }
+
+
+@mcp.tool(description="Automatically place footprints for the current session board and update the session working board. Use this as the default placement step before routing.")
+def auto_place_session_footprints(
+    session_id: str,
+    output_board: str | None = None,
+    references: list[str] | None = None,
+    zero_only: bool = True,
+    placement_gap: float = 1.0,
+    board_margin: float = 0.25,
+    grid_step: float = 0.25,
+    refresh_analysis: bool = True,
+) -> dict[str, Any]:
+    session = _load_session(session_id)
+    board_path = session.get("working_board_path") or session["board_path"]
+    output_path = (
+        str(_resolve_path(output_board))
+        if output_board
+        else str(Path(session["output_dir"]) / f"{Path(board_path).stem}_auto_place_{len(session.get('placement_history', [])) + 1}.kicad_pcb")
+    )
+    result = auto_place_footprints(
+        pcb_path=board_path,
+        output_path=output_path,
+        references=references,
+        zero_only=zero_only,
+        placement_gap=placement_gap,
+        board_margin=board_margin,
+        grid_step=grid_step,
+    )
+
+    file_validation: dict[str, Any] | None = None
+    if result.get("success") and Path(result["output_path"]).exists():
+        file_validation = validate_kicad_pcb_file(result["output_path"], use_pcbnew_if_available=False)
+        result["file_validation"] = file_validation
+
+    history_entry = {
+        "applied_at": utc_now_iso(),
+        "input_board_path": board_path,
+        "output_board_path": result.get("output_path"),
+        "success": result.get("success", False),
+        "validation": result.get("validation"),
+        "strategy": result.get("strategy"),
+        "placed_references": result.get("placed_references"),
+        "file_validation": file_validation,
+    }
+    session.setdefault("placement_history", []).append(history_entry)
+    session["latest_placement_validation"] = result.get("validation")
+
+    if result.get("success") and Path(result["output_path"]).exists():
+        session["working_board_path"] = result["output_path"]
+        session["status"] = "placed"
+        _record_artifact(session, "boards", result["output_path"])
+        if refresh_analysis:
+            session["analysis"] = analyze_board(result["output_path"])
+        add_note(session, f"Automatically placed footprints into {result['output_path']}.")
+    else:
+        session["status"] = "placement-failed"
+        add_note(session, f"Automatic footprint placement failed for {board_path}.")
+
+    session = _save_session(session)
+    return {
+        "session_id": session_id,
+        "working_board_path": session.get("working_board_path"),
+        "result": result,
     }
 
 
@@ -1223,6 +1489,8 @@ def apply_routing_plan(
 
             if result.get("success") and output_board and Path(output_board).exists():
                 current_board = str(Path(output_board).resolve())
+                if step_kind == "auto_place_footprints":
+                    session["analysis"] = analyze_board(current_board)
 
             if _result_requires_attention(step_kind, result):
                 failed = True
@@ -1287,6 +1555,7 @@ def analyze_session_failures(session_id: str) -> dict[str, Any]:
     summary = summarize_execution_failures(session)
     summary["working_board_path"] = session.get("working_board_path")
     summary["coordinate_mode"] = session.get("coordinate_mode")
+    summary["placement_mode"] = session.get("placement_mode")
     return summary
 
 
@@ -1295,6 +1564,8 @@ def suggest_next_routing_actions(session_id: str) -> dict[str, Any]:
     session = _load_session(session_id)
     summary = summarize_execution_failures(session)
     suggestions = list(summary.get("next_actions") or [])
+    analysis = session.get("analysis") or {}
+    placement_hints = analysis.get("placement_hints") or {}
 
     if not session.get("analysis"):
         suggestions.insert(
@@ -1302,6 +1573,15 @@ def suggest_next_routing_actions(session_id: str) -> dict[str, Any]:
             {
                 "action": "analyze-board",
                 "reason": "This session has no stored analysis snapshot yet.",
+            },
+        )
+    elif placement_hints.get("needs_placement") and not session.get("placement_history"):
+        suggestions.insert(
+            0,
+            {
+                "action": "auto-place-footprints",
+                "reason": "The board analysis indicates zeroed or out-of-bounds footprints; place them before routing.",
+                "references": placement_hints.get("suggested_refs"),
             },
         )
     elif not session.get("proposed_plan"):
@@ -1339,11 +1619,30 @@ def suggest_next_routing_actions(session_id: str) -> dict[str, Any]:
             }
         )
 
+    if session.get("placement_mode") == "llm_placement":
+        if not session.get("placement_context"):
+            suggestions.insert(
+                0,
+                {
+                    "action": "build-placement-context",
+                    "reason": "LLM placement mode is active but no placement context snapshot has been prepared yet.",
+                },
+            )
+        if not session.get("placement_history"):
+            suggestions.insert(
+                1,
+                {
+                    "action": "validate-or-apply-placement-plan",
+                    "reason": "No LLM-authored placement plan has been attempted in this session yet.",
+                },
+            )
+
     return {
         "session_id": session_id,
         "status": session.get("status"),
         "working_board_path": session.get("working_board_path"),
         "coordinate_mode": session.get("coordinate_mode"),
+        "placement_mode": session.get("placement_mode"),
         "latest_execution_summary": summary,
         "suggestions": suggestions,
     }

@@ -13,6 +13,11 @@ def utc_now_iso() -> str:
 
 def normalize_constraints(constraints: dict[str, Any] | None) -> dict[str, Any]:
     data = deepcopy(constraints or {})
+    data.setdefault("placement_mode", "auto")
+    data.setdefault("place_zero_only", True)
+    data.setdefault("placement_gap", 1.0)
+    data.setdefault("board_margin", 0.25)
+    data.setdefault("placement_grid_step", 0.25)
     data.setdefault("route_mode", "balanced")
     data.setdefault("route_diff_pairs_first", True)
     data.setdefault("prefer_existing_zones", True)
@@ -56,7 +61,33 @@ def build_routing_plan(
     diff_pairs = analysis.get("differential_pairs", [])
     ground_nets = analysis.get("ground_nets", [])
     power_nets = analysis.get("power_nets", [])
+    placement_hints = analysis.get("placement_hints", {})
     planning_hints = analysis.get("planning_hints", {})
+
+    placement_mode = normalized["placement_mode"]
+    should_place = placement_mode == "force" or (
+        placement_mode == "auto" and placement_hints.get("needs_placement")
+    )
+    if should_place:
+        output_board = _artifact_path(session, base_name, step_index, "placed")
+        steps.append(
+            {
+                "step_id": f"step-{step_index:02d}-footprint-placement",
+                "kind": "auto_place_footprints",
+                "reason": "Place zeroed or out-of-bounds footprints before fanout and routing.",
+                "input_board": current_input,
+                "output_board": output_board,
+                "parameters": {
+                    "references": placement_hints.get("suggested_refs") or None,
+                    "zero_only": normalized["place_zero_only"],
+                    "placement_gap": normalized["placement_gap"],
+                    "board_margin": normalized["board_margin"],
+                    "grid_step": normalized["placement_grid_step"],
+                },
+            }
+        )
+        current_input = output_board
+        step_index += 1
 
     use_power_planes = normalized["use_power_planes"]
     if use_power_planes is None:
@@ -213,6 +244,7 @@ def build_routing_plan(
         "constraints": normalized,
         "analysis_snapshot": {
             "board": analysis["board"],
+            "placement_hints": placement_hints,
             "planning_hints": analysis["planning_hints"],
             "fanout_candidate_count": len(fanout_candidates),
             "diff_pair_count": len(diff_pairs),
@@ -268,6 +300,15 @@ def summarize_execution_failures(session: dict[str, Any]) -> dict[str, Any]:
                             "max_iterations": max((step.get("parameters") or {}).get("max_iterations") or 200000, 1000000),
                             "extra_args": ["--no-bga-zones"],
                         },
+                    }
+                )
+
+            if step.get("kind") == "auto_place_footprints":
+                next_actions.append(
+                    {
+                        "action": "build-placement-context",
+                        "target_step_id": step.get("step_id"),
+                        "reason": "Automatic footprint placement failed; inspect component connectivity and propose an LLM-authored placement plan.",
                     }
                 )
 

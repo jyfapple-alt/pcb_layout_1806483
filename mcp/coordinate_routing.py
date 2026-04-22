@@ -32,6 +32,15 @@ def _distance(x1: float, y1: float, x2: float, y2: float) -> float:
     return math.hypot(x2 - x1, y2 - y1)
 
 
+def _turn_angle_degrees(v1x: float, v1y: float, v2x: float, v2y: float) -> float | None:
+    len1 = math.hypot(v1x, v1y)
+    len2 = math.hypot(v2x, v2y)
+    if len1 <= 1e-9 or len2 <= 1e-9:
+        return None
+    cos_theta = max(-1.0, min(1.0, ((v1x * v2x) + (v1y * v2y)) / (len1 * len2)))
+    return math.degrees(math.acos(cos_theta))
+
+
 def _board_bounds_contains(board_bounds: tuple[float, float, float, float] | None, x: float, y: float) -> bool:
     if not board_bounds:
         return True
@@ -205,9 +214,11 @@ def build_coordinate_context(
                         "track_width": defaults.track_width,
                         "points": [
                             {"x": 10.0, "y": 10.0, "layer": "F.Cu"},
-                            {"x": 12.0, "y": 10.0, "layer": "F.Cu"},
-                            {"x": 12.0, "y": 10.0, "layer": "B.Cu"},
-                            {"x": 15.0, "y": 10.0, "layer": "B.Cu"},
+                            {"x": 11.6, "y": 10.0, "layer": "F.Cu"},
+                            {"x": 12.2, "y": 10.6, "layer": "F.Cu"},
+                            {"x": 12.2, "y": 12.2, "layer": "F.Cu"},
+                            {"x": 12.2, "y": 12.2, "layer": "B.Cu"},
+                            {"x": 13.8, "y": 12.2, "layer": "B.Cu"},
                         ],
                     }
                 ],
@@ -215,6 +226,7 @@ def build_coordinate_context(
             "rules": [
                 "Repeat the same XY with a different layer to request a via.",
                 "Keep consecutive same-layer points distinct.",
+                "Keep same-layer bends obtuse; prefer a 45-degree chamfer (135-degree internal angle) instead of a 90-degree corner.",
                 "Anchor the first and last point to an existing same-net pad, via, segment, or stub.",
                 "Snap coordinates to the routing grid when possible.",
             ],
@@ -355,6 +367,28 @@ def validate_coordinate_plan(
             add_error(route_index, 0, f"Route start for {net.name} does not anchor to an existing same-net conductor.")
         if not has_anchor(net.net_id, last_point["x"], last_point["y"], last_point["layer"]):
             add_error(route_index, len(normalized_points) - 1, f"Route end for {net.name} does not anchor to an existing same-net conductor.")
+
+        for point_index in range(1, len(normalized_points) - 1):
+            prev_point = normalized_points[point_index - 1]
+            current_point = normalized_points[point_index]
+            next_point = normalized_points[point_index + 1]
+            if prev_point["layer"] != current_point["layer"] or current_point["layer"] != next_point["layer"]:
+                continue
+
+            turn_angle = _turn_angle_degrees(
+                current_point["x"] - prev_point["x"],
+                current_point["y"] - prev_point["y"],
+                next_point["x"] - current_point["x"],
+                next_point["y"] - current_point["y"],
+            )
+            if turn_angle is None:
+                continue
+            if turn_angle >= 89.5:
+                add_error(
+                    route_index,
+                    point_index,
+                    f"{net.name} has a {turn_angle:.1f} degree same-layer bend at point {point_index}; use an obtuse corner with a 45-degree chamfer instead of a 90-degree or sharper turn.",
+                )
 
         route_track_count = 0
         route_via_count = 0

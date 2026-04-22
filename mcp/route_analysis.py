@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,9 @@ HIGH_SPEED_NET_PATTERNS = {
 
 
 def _import_parse_kicad_pcb():
+    tools_root = Path(__file__).resolve().parent / "kicad_routing_tools"
+    if str(tools_root) not in sys.path:
+        sys.path.insert(0, str(tools_root))
     from kicad_parser import parse_kicad_pcb
 
     return parse_kicad_pcb
@@ -127,6 +132,10 @@ def analyze_board(pcb_path: str | Path) -> dict[str, Any]:
     diff_pairs = find_differential_pairs(net_names)
 
     fanout_candidates: list[dict[str, Any]] = []
+    footprints_at_origin: list[str] = []
+    footprints_outside_board: list[str] = []
+    collapsed_positions: dict[tuple[float, float], list[str]] = {}
+    board_bounds = pcb.board_info.board_bounds
     for ref, footprint in sorted(pcb.footprints.items()):
         footprint_name = footprint.footprint_name or ""
         pad_count = len(footprint.pads)
@@ -141,12 +150,46 @@ def analyze_board(pcb_path: str | Path) -> dict[str, Any]:
                     "recommended_tool": "run_qfn_fanout" if ("QFN" in upper_name or "QFP" in upper_name) else "run_bga_fanout",
                 }
             )
+        if abs(float(footprint.x)) <= 0.05 and abs(float(footprint.y)) <= 0.05:
+            footprints_at_origin.append(ref)
+        if board_bounds:
+            min_x, min_y, max_x, max_y = board_bounds
+            if footprint.x < min_x or footprint.x > max_x or footprint.y < min_y or footprint.y > max_y:
+                footprints_outside_board.append(ref)
+        collapsed_key = (round(float(footprint.x), 1), round(float(footprint.y), 1))
+        collapsed_positions.setdefault(collapsed_key, []).append(ref)
 
     unrouted_named_nets = [
         net
         for net in named_nets
         if net["pad_count"] >= 2 and net["net_id"] not in routed_net_ids and net["name"] not in zone_net_names
     ]
+
+    collapsed_groups = [
+        {
+            "x": key[0],
+            "y": key[1],
+            "count": len(refs),
+            "references": sorted(refs),
+        }
+        for key, refs in collapsed_positions.items()
+        if len(refs) > 1
+    ]
+    collapsed_groups.sort(key=lambda item: (-item["count"], item["x"], item["y"]))
+
+    collapsed_refs: set[str] = set()
+    collapse_threshold = max(3, math.ceil(max(1, len(pcb.footprints)) * 0.4))
+    for group in collapsed_groups:
+        if group["count"] >= collapse_threshold:
+            collapsed_refs.update(group["references"])
+
+    placement_hints = {
+        "footprints_at_origin": sorted(footprints_at_origin),
+        "footprints_outside_board": sorted(footprints_outside_board),
+        "collapsed_groups": collapsed_groups[:10],
+        "suggested_refs": sorted(set(footprints_at_origin) | set(footprints_outside_board) | collapsed_refs),
+    }
+    placement_hints["needs_placement"] = bool(placement_hints["suggested_refs"])
 
     planning_hints = {
         "has_existing_ground_zone": any(zone.get("net_name") and _is_ground(zone["net_name"]) for zone in zones),
@@ -168,6 +211,7 @@ def analyze_board(pcb_path: str | Path) -> dict[str, Any]:
             "total_zones": len(zones),
             "fresh_board": len(pcb.segments) == 0,
             "copper_layers": copper_layers,
+            "board_bounds": board_bounds,
         },
         "zones": zones,
         "nets": named_nets,
@@ -177,6 +221,6 @@ def analyze_board(pcb_path: str | Path) -> dict[str, Any]:
         "fanout_candidates": fanout_candidates,
         "unrouted_named_nets": unrouted_named_nets,
         "high_speed_hints": classify_speed(net_names),
+        "placement_hints": placement_hints,
         "planning_hints": planning_hints,
     }
-

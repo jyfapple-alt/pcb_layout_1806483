@@ -56,6 +56,7 @@ def create_session(
     session_name: str | None = None,
     description: str | None = None,
     coordinate_mode: str = "algorithm_only",
+    placement_mode: str = "auto",
 ) -> dict[str, Any]:
     session_id = f"rs_{uuid.uuid4().hex[:10]}"
     session_dir = ensure_session_root(session_root) / session_id
@@ -67,6 +68,7 @@ def create_session(
         "board_path": board_path,
         "working_board_path": board_path,
         "coordinate_mode": coordinate_mode,
+        "placement_mode": placement_mode,
         "status": "created",
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -78,6 +80,9 @@ def create_session(
         "proposed_plan": None,
         "execution_history": [],
         "latest_checks": {},
+        "placement_context": None,
+        "latest_placement_validation": None,
+        "placement_history": [],
         "coordinate_context": None,
         "latest_coordinate_validation": None,
         "coordinate_history": [],
@@ -117,6 +122,7 @@ def list_sessions(session_root: Path) -> list[dict[str, Any]]:
                     "board_path": data.get("board_path"),
                     "working_board_path": data.get("working_board_path"),
                     "coordinate_mode": data.get("coordinate_mode"),
+                    "placement_mode": data.get("placement_mode"),
                     "updated_at": data.get("updated_at"),
                     "created_at": data.get("created_at"),
                 }

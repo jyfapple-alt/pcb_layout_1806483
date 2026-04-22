@@ -1,4 +1,4 @@
 interface:
-  display_name: "Route KiCad PCB"
-  short_description: "Analyze and autoroute KiCad PCBs through the local MCP service."
-  default_prompt: "Use $route-kicad-pcb-mcp to inspect and autoroute a KiCad PCB in this repository."
+  display_name: "Place & Route KiCad PCB"
+  short_description: "Analyze, place, and route KiCad PCBs through the local MCP service."
+  default_prompt: "Use $route-kicad-pcb-mcp to place footprints when needed and then route a KiCad PCB in this repository."
